@@ -606,6 +606,7 @@ body{font-family:'Nunito',sans-serif;min-height:100vh;overflow-x:hidden;backgrou
       <div class="controls" style="padding-top:12px">
         <button class="btn btn-yellow" onclick="openAddModal()">➕ Add Player</button>
         <button class="btn btn-yellow" onclick="openNewWeekModal()">📅 New Week</button>
+        <button class="btn btn-red" onclick="deleteCurrentWeek()">🗑️ Delete Week</button>
         <button class="btn btn-purple" onclick="openAuditModal()">🕵️ Audit</button>
         <button class="btn btn-red" onclick="lockAdmin()">🔒 Lock Admin</button>
       </div>
@@ -1513,7 +1514,29 @@ async function saveScores(){
 
   closeModal('scoreModal');
   await renderWeek();
- const newEntries=upserts.filter(u=>{if(u.guesses===null)return false;const prev=previousGuesses[u.day_index];return prev===null||prev===undefined;});const todayScore=newEntries.length>0?newEntries.reduce((t,u)=>t+sv(u.guesses),0):upserts.filter(u=>u.guesses!==null).reduce((t,u)=>t+sv(u.guesses),0);showReaction(name,todayScore,upserts);
+  // Find the day score to react to: prefer the single new entry today, else the last non-null entry
+  const newEntries=upserts.filter(u=>{if(u.guesses===null)return false;const prev=previousGuesses[u.day_index];return prev===null||prev===undefined;});
+  let reactionGuess=null;
+  if(newEntries.length===1){
+    // Exactly one new score entered — react to that specific day
+    reactionGuess=newEntries[0].guesses===7?'X':newEntries[0].guesses;
+  } else if(newEntries.length>1){
+    // Multiple days entered at once — react to the worst one (most drama)
+    const worst=newEntries.reduce((a,b)=>sv(b.guesses)>sv(a.guesses)?b:a);
+    reactionGuess=worst.guesses===7?'X':worst.guesses;
+  } else {
+    // Editing existing scores — react to the last non-null
+    const nonNull=upserts.filter(u=>u.guesses!==null);
+    if(nonNull.length){const last=nonNull[nonNull.length-1];reactionGuess=last.guesses===7?'X':last.guesses;}
+  }
+  if(reactionGuess!==null){
+    // Convert raw guess to sv score for pool selection
+    const dayScore=sv(reactionGuess==='X'?7:reactionGuess);
+    showReaction(name,dayScore,upserts);
+  } else {
+    showToast(`${name}'s scores saved! ⛳`);
+  }
+}
 
 // ─── RELINK PHOTO ──────────────────────────────────────────────────────────────
 let relinkPlayerId=null;
@@ -1702,6 +1725,23 @@ async function createWeek(){
   closeModal('newWeekModal');
   await renderWeek();
   showToast(`Week of ${fmtWeek(dv)} opened! 📅`);
+}
+
+async function deleteCurrentWeek(){
+  if(!isAuthed){showToast('Admin required');return}
+  if(!confirm(`Delete ALL scores for the week of ${fmtWeek(currentWeekStart)}? This cannot be undone.`))return;
+  // Delete scores
+  await sb.from('scores').delete().eq('week_start',currentWeekStart);
+  // Delete proofs for this week
+  try{await sb.from('proofs').delete().eq('week_start',currentWeekStart);}catch(e){}
+  // Remove from allWeeks and navigate to previous week if possible
+  allWeeks=allWeeks.filter(w=>w!==currentWeekStart);
+  if(allWeeks.length){
+    currentWeekStart=allWeeks[allWeeks.length-1];
+  }
+  document.getElementById('weekLabel').textContent=allWeeks.length?fmtWeek(currentWeekStart):'No weeks';
+  await renderWeek();
+  showToast('Week deleted 🗑️');
 }
 
 // ─── SEASON ────────────────────────────────────────────────────────────────────
@@ -2127,55 +2167,69 @@ document.addEventListener('DOMContentLoaded',()=>{
 });
 
 // ─── SCORE REACTION POPUP ──────────────────────────────────────────────────────
-const REACTIONS_GOOD=[
-  {emoji:'🦅',headline:'EAGLE! You absolute legend!',sub:'That\'s some serious Wordle game'},
-  {emoji:'🎉',headline:'Birdie baby!',sub:'Under par and looking smug about it'},
-  {emoji:'🏆',headline:'Par excellence!',sub:'Textbook. Clean. Respectable.'},
-  {emoji:'🔥',headline:'On fire this week!',sub:'The office is shaking'},
-  {emoji:'😎',headline:'Too easy.',sub:'Did you even break a sweat?'},
-];
-const REACTIONS_MEH=[
-  {emoji:'😌',headline:'Par for the course.',sub:'Literally. It\'s called par for a reason.'},
-  {emoji:'⛳',headline:'Solid. Very... solid.',sub:'Not great, not embarrassing. You\'re fine.'},
-  {emoji:'🤷',headline:'Could be worse!',sub:'Could also be better, but let\'s not dwell.'},
-  {emoji:'😐',headline:'Average.',sub:'The dictionary definition of acceptable.'},
-];
-const REACTIONS_BAD=[
-  {emoji:'💀',headline:'Yikes.',sub:'The Wordle gods are not pleased with you.'},
-  {emoji:'🤦',headline:'Did you even try?',sub:'Genuinely asking. For a friend.'},
-  {emoji:'🫣',headline:'This is painful to witness.',sub:'We still love you. Kind of.'},
-  {emoji:'🏌️',headline:'You missed more putts than you sank.',sub:'Big bogey energy. Very big.'},
-  {emoji:'😬',headline:'The board has been informed.',sub:'An emergency meeting has been called.'},
-  {emoji:'🎳',headline:'Wrong sport, champ.',sub:'Have you considered just... not playing?'},
-];
+// Reactions keyed by individual day score (what you just entered today)
+const REACTIONS_BY_SCORE={
+  2:[
+    {emoji:'🦅',headline:'EAGLE! Are you even human?',sub:'2 guesses. TWO. The office bows down.'},
+    {emoji:'🤯',headline:'Two and done.',sub:'Honestly suspicious. Screenshots or it didn\'t happen.'},
+    {emoji:'🏆',headline:'Eagle on the board!',sub:'That\'s −2. Go brag to someone immediately.'},
+  ],
+  3:[
+    {emoji:'🐦',headline:'Birdie! Smooth.',sub:'Three guesses and walking away like nothing happened.'},
+    {emoji:'😎',headline:'Birdie baby.',sub:'Under par and you know it.'},
+    {emoji:'🔥',headline:'Three and out.',sub:'Clean. Efficient. Annoying for everyone else.'},
+  ],
+  4:[
+    {emoji:'⛳',headline:'Par. Classic.',sub:'Exactly what was expected. Nothing more, nothing less.'},
+    {emoji:'😌',headline:'Par for the course.',sub:'Literally. It\'s called par for a reason.'},
+    {emoji:'🤷',headline:'Four it is.',sub:'Safe. Respectable. Completely forgettable.'},
+  ],
+  5:[
+    {emoji:'😬',headline:'Bogey. Rough.',sub:'Five guesses. The word was right there.'},
+    {emoji:'🏌️',headline:'Bogey on the card.',sub:'+1. Not ideal but we\'ve seen worse.'},
+    {emoji:'🙈',headline:'Five guesses...',sub:'You had four chances before that. Just saying.'},
+  ],
+  6:[
+    {emoji:'💀',headline:'Double bogey. Ouch.',sub:'Six guesses and you barely made it out alive.'},
+    {emoji:'😩',headline:'Six. SIX.',sub:'The word had five letters. You had six tries.'},
+    {emoji:'🫣',headline:'That was close.',sub:'Too close. Please practise over the weekend.'},
+  ],
+  X:[
+    {emoji:'🤦',headline:'Triple bogey. Did you even try?',sub:'Genuinely asking. For a friend.'},
+    {emoji:'🎳',headline:'Wrong sport, champ.',sub:'Have you considered just... not playing Wordle?'},
+    {emoji:'😬',headline:'The board has been informed.',sub:'An emergency meeting has been called.'},
+    {emoji:'🏳️',headline:'Failed. It happens.',sub:'To other people. Mostly. But also apparently you.'},
+  ],
+};
 
-function showReaction(name,weekTotal,scores){
+function showReaction(name,dayScore,scores){
   const played=scores.filter(s=>s.guesses!==null).length;
   if(played===0){showToast(`${name}'s scores saved! ⛳`);return}
 
-  let pool,toneClass;
-  if(weekTotal<0){
-    pool=REACTIONS_GOOD;toneClass='reaction-good';
-  } else if(weekTotal===0){
-    pool=REACTIONS_MEH;toneClass='reaction-meh';
-  } else if(weekTotal<=3){
-    pool=REACTIONS_BAD.slice(0,3);toneClass='reaction-bad';
-  } else {
-    pool=REACTIONS_BAD;toneClass='reaction-bad';
-  }
+  // dayScore is the score from today's new entry; map to reaction key
+  // dayScore is the sv() value: -2=eagle, -1=birdie, 0=par, 1=bogey, 2=double, 3=triple/X
+  let scoreKey;
+  if(dayScore<=-2)scoreKey=2;
+  else if(dayScore===-1)scoreKey=3;
+  else if(dayScore===0)scoreKey=4;
+  else if(dayScore===1)scoreKey=5;
+  else if(dayScore===2)scoreKey=6;
+  else scoreKey='X';
 
+  const pool=REACTIONS_BY_SCORE[scoreKey];
+  const toneClass=dayScore<0?'reaction-good':dayScore===0?'reaction-meh':'reaction-bad';
   const r=pool[Math.floor(Math.random()*pool.length)];
-  const scoreLabel=weekTotal>0?`+${weekTotal}`:String(weekTotal);
-  const daysEntered=scores.filter(s=>s.guesses!==null).length;
-  const dayWord=daysEntered===1?'today':'today';
-  const scoreDesc=weekTotal<0?`Under par ${dayWord} 🎉`:weekTotal===0?`Par ${dayWord} ⛳`:`Over par ${dayWord} 😬`;
+
+  // Badge label: show today's raw guess count + golf term
+  const guessLabels={2:'Eagle −2 🦅',3:'Birdie −1 🐦',4:'Par 0 ⛳',5:'Bogey +1 😬',6:'Double +2 💀','X':'Triple +3 🤦'};
+  const badgeText=guessLabels[scoreKey]||`Score ${dayScore>0?'+'+dayScore:dayScore}`;
 
   const card=document.getElementById('reactionCard');
   card.className='reaction-card '+toneClass;
   document.getElementById('reactionEmoji').textContent=r.emoji;
   document.getElementById('reactionHeadline').textContent=r.headline;
   document.getElementById('reactionSub').textContent=r.sub;
-  document.getElementById('reactionBadge').textContent=`${scoreLabel}  ${scoreDesc}`;
+  document.getElementById('reactionBadge').textContent=badgeText;
   document.getElementById('reactionDismiss').textContent=toneClass==='reaction-good'?"Thanks, I know 😎":toneClass==='reaction-meh'?"Fair enough 🤷":"I regret nothing 💀";
 
   document.getElementById('reactionOverlay').classList.add('active');
