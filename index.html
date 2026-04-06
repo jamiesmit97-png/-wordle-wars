@@ -1513,8 +1513,7 @@ async function saveScores(){
 
   closeModal('scoreModal');
   await renderWeek();
-  showReaction(name,weekTotal,upserts);
-}
+ const newEntries=upserts.filter(u=>{if(u.guesses===null)return false;const prev=previousGuesses[u.day_index];return prev===null||prev===undefined;});const todayScore=newEntries.length>0?newEntries.reduce((t,u)=>t+sv(u.guesses),0):upserts.filter(u=>u.guesses!==null).reduce((t,u)=>t+sv(u.guesses),0);showReaction(name,todayScore,upserts);
 
 // ─── RELINK PHOTO ──────────────────────────────────────────────────────────────
 let relinkPlayerId=null;
