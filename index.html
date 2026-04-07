@@ -1056,9 +1056,11 @@ function golfAvatarEl(photoUrl, name, rankClass, size='normal'){
 
 // ─── WEEK HELPERS ──────────────────────────────────────────────────────────────
 function getMonday(d=new Date()){
-  const date=new Date(d),day=date.getDay();
-  date.setDate(date.getDate()-day+(day===0?-6:1));
-  return date.toISOString().split('T')[0];
+  const local=new Date(d.getFullYear(),d.getMonth(),d.getDate());
+  const day=local.getDay();
+  local.setDate(local.getDate()-day+(day===0?-6:1));
+  const y=local.getFullYear(),m=String(local.getMonth()+1).padStart(2,'0'),dd=String(local.getDate()).padStart(2,'0');
+  return `${y}-${m}-${dd}`;
 }
 function fmtWeek(ds){
   const d=new Date(ds+'T00:00:00'),end=new Date(d);
@@ -1082,11 +1084,9 @@ async function init(){
   if(pe){showToast('DB error: '+pe.message);return}
   players=pd||[];
   const{data:wd}=await sb.from('scores').select('week_start').order('week_start');
-  const ws=new Set((wd||[]).map(r=>r.week_start));
-  ws.add(getMonday());
-  allWeeks=[...ws].sort();
-  currentWeekStart=getMonday();
-  document.getElementById('weekLabel').textContent=fmtWeek(currentWeekStart);
+  allWeeks=[...new Set((wd||[]).map(r=>r.week_start))].sort();
+  currentWeekStart=allWeeks.length?allWeeks[allWeeks.length-1]:null;
+  document.getElementById('weekLabel').textContent=currentWeekStart?fmtWeek(currentWeekStart):'No weeks';
   await renderWeek();
   autoLockMissedDays();
 }
