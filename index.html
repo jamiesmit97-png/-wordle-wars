@@ -237,6 +237,7 @@ body{font-family:'Nunito',sans-serif;min-height:100vh;overflow-x:hidden;backgrou
 .tile-double{background:linear-gradient(135deg,#b91c1c,#ef4444)}
 .tile-triple{background:linear-gradient(135deg,#7f1d1d,#b91c1c)}
 .tile-miss{background:#e5e7eb;color:#9ca3af}
+.tile-locked{filter:grayscale(60%);cursor:default}
 
 .total-score{font-family:'Boogaloo',cursive;font-size:clamp(26px,4vw,36px);text-align:right;min-width:60px}
 .score-neg{color:var(--score-green)}.score-pos{color:var(--score-red)}.score-zero{color:#d97706}
@@ -1372,10 +1373,11 @@ async function renderWeek(){
 
   const ps=players.map(p=>{
     const s=scores.filter(x=>x.player_id===p.id);
-    const days=Array(5).fill(null).map((_,i)=>{const f=s.find(x=>x.day_index===i);return f?f.guesses:null});
-    // played = manually entered scores only (not auto-locked X's)
-    const played=s.filter(x=>x.guesses!==null&&!(x.auto_locked===true&&x.guesses===7)).length;
-    return{...p,days,total:cws(s),played};
+    const days=Array(5).fill(null).map((_,i)=>{const f=s.find(x=>x.day_index===i);return f||null;});
+    // played = days where a real score exists (not an auto-locked missed day)
+    const played=s.filter(x=>x.guesses!==null&&!x.auto_locked).length;
+    const total=s.reduce((t,x)=>t+sv(x.guesses),0);
+    return{...p,days,total,played};
   });
   ps.sort((a,b)=>a.total-b.total||(b.played-a.played));
   renderCrowd(ps);
@@ -1394,8 +1396,16 @@ async function renderWeek(){
     const re=r===1?'🥇':r===2?'🥈':r===3?'🥉':r;
     const sc=p.total<0?'score-neg':p.total>0?'score-pos':'score-zero';
     const sd=p.total>0?`+${p.total}`:String(p.total);
-    const pl=p.days.filter(d=>d!==null).length;
-    const tiles=p.days.map(g=>`<div class="score-tile ${TC[g]||'tile-miss'}" title="${EM[g]||'—'}">${LB[g]||'·'}</div>`).join('');
+    const pl=p.days.filter(d=>d&&!d.auto_locked).length;
+    const tiles=p.days.map(row=>{
+      if(!row)return`<div class="score-tile tile-miss" title="—">·</div>`;
+      const g=row.guesses;
+      const locked=row.auto_locked;
+      const tileClass=TC[g]||'tile-miss';
+      const label=locked?'🔒':(LB[g]||'·');
+      const tip=locked?'Auto-locked (missed)':(EM[g]||'—');
+      return`<div class="score-tile ${tileClass}${locked?' tile-locked':''}" title="${tip}" style="${locked?'opacity:.55;':''}">${label}</div>`;
+    }).join('');
     const photoUrl=p.photo_url||null;
     html+=`<div class="player-card ${rc}" onclick="openScoreModal('${p.id}')">
       ${isAuthed?`<button class="delete-btn" onclick="deletePlayer('${p.id}',event)">✕</button>`:''}
@@ -1450,16 +1460,23 @@ function getSortedRank(playerId){
 }
 
 let previousGuesses={};
+let autoLockedDays=new Set();
 async function buildGuessGrid(){
   const pid=pendingPlayerId;
   const{data:ex}=await sb.from('scores').select('*').eq('player_id',pid).eq('week_start',currentWeekStart);
   previousGuesses={};
-  (ex||[]).forEach(s=>{previousGuesses[s.day_index]=s.guesses===7?'X':s.guesses;});
+  autoLockedDays=new Set();
+  (ex||[]).forEach(s=>{
+    previousGuesses[s.day_index]=s.guesses===7?'X':s.guesses;
+    if(s.auto_locked)autoLockedDays.add(s.day_index);
+  });
   document.getElementById('guessGrid').innerHTML=DAYS.map((day,i)=>{
     const s=(ex||[]).find(x=>x.day_index===i);
     const rawG=s?s.guesses:null;const v=rawG===null?'null':rawG===7?'X':String(rawG);
+    const locked=s&&s.auto_locked&&!isAuthed;
+    const lockedNote=locked?`<div style="font-size:10px;color:#ef4444;font-family:'Fredoka One',cursive;text-align:center;margin-top:2px">🔒 auto</div>`:'';
     return`<div class="guess-cell"><div class="guess-day-label">${day}</div>
-      <select class="guess-select" id="guess_${i}" onchange="updateProofHint()">
+      <select class="guess-select" id="guess_${i}" onchange="updateProofHint()" ${locked?'disabled style="opacity:.5"':''}>
         <option value="null" ${v==='null'?'selected':''}>—</option>
         <option value="2" ${v==='2'?'selected':''}>2 🦅</option>
         <option value="3" ${v==='3'?'selected':''}>3 🐦</option>
@@ -1467,14 +1484,19 @@ async function buildGuessGrid(){
         <option value="5" ${v==='5'?'selected':''}>5 😬</option>
         <option value="6" ${v==='6'?'selected':''}>6 💀</option>
         <option value="X" ${v==='X'?'selected':''}>X 🤦</option>
-      </select></div>`;
+      </select>${lockedNote}</div>`;
   }).join('');
 }
 
 async function saveScores(){
   const pid=pendingPlayerId;
   const name=players.find(p=>p.id===pid)?.name;
-  const upserts=DAYS.map((_,i)=>{const r=document.getElementById(`guess_${i}`).value;const gv=r==='null'?null:r==='X'?7:parseInt(r);return{player_id:pid,week_start:currentWeekStart,day_index:i,guesses:gv};});
+  const upserts=DAYS.map((_,i)=>{
+    const r=document.getElementById(`guess_${i}`).value;
+    const gv=r==='null'?null:r==='X'?7:parseInt(r);
+    // Clear auto_locked flag when user submits a real score for that day
+    return{player_id:pid,week_start:currentWeekStart,day_index:i,guesses:gv,auto_locked:false};
+  });
   const weekTotal=upserts.reduce((t,u)=>t+sv(u.guesses),0);
   const played=upserts.filter(u=>u.guesses!==null).length;
 
@@ -1703,7 +1725,10 @@ async function confirmAddPlayer(){
 // ─── DELETE / NEW WEEK ─────────────────────────────────────────────────────────
 async function deletePlayer(id,e){
   e.stopPropagation();
-  if(!confirm('Remove this player?'))return;
+  if(!confirm('Remove this player and all their scores?'))return;
+  // Delete scores first, then proofs, then player
+  await sb.from('scores').delete().eq('player_id',id);
+  try{await sb.from('proofs').delete().eq('player_id',id);}catch(err){}
   await sb.from('players').delete().eq('id',id);
   players=players.filter(p=>p.id!==id);
   await renderWeek();
@@ -1711,7 +1736,8 @@ async function deletePlayer(id,e){
 
 function openNewWeekModal(){
   const next=new Date(currentWeekStart+'T00:00:00');next.setDate(next.getDate()+7);
-  document.getElementById('newWeekDate').value=next.toISOString().split('T')[0];
+  const y=next.getFullYear(),m=String(next.getMonth()+1).padStart(2,'0'),d=String(next.getDate()).padStart(2,'0');
+  document.getElementById('newWeekDate').value=`${y}-${m}-${d}`;
   document.getElementById('newWeekModal').classList.add('active');
 }
 
@@ -1748,17 +1774,18 @@ async function deleteCurrentWeek(){
 async function renderSeason(){
   const wrap=document.getElementById('seasonWrap');
   wrap.innerHTML='<div class="loading"><div class="spinner">🏆</div><div>Counting up the cards...</div></div>';
-  const{data:all,error}=await sb.from('scores').select('*');
+  // Only fetch the columns we need; filter to weeks we already know about
+  const{data:all,error}=await sb.from('scores').select('player_id,week_start,guesses,auto_locked');
   if(error||!players.length){wrap.innerHTML='<div class="empty-state"><div class="big">🏆</div>No season data yet!</div>';return}
   const weeks=[...new Set((all||[]).map(s=>s.week_start))].sort();
   const sd=players.map(p=>{
     const wt={};
     weeks.forEach(w=>{const ws=(all||[]).filter(s=>s.player_id===p.id&&s.week_start===w);wt[w]=ws.length>0?ws.reduce((t,s)=>t+sv(s.guesses),0):null;});
     const allWeekVals=Object.values(wt).filter(v=>v!==null);
-    // For played count in season, use scores that aren't auto-locked X
+    // For played count in season, exclude auto-locked missed days
     const playedWeeks=weeks.filter(w=>{
       const ws=(all||[]).filter(s=>s.player_id===p.id&&s.week_start===w);
-      return ws.some(s=>!(s.auto_locked===true&&s.guesses===7));
+      return ws.some(s=>!s.auto_locked);
     });
     return{...p,wt,total:allWeekVals.reduce((t,v)=>t+v,0),played:playedWeeks.length,best:allWeekVals.length?Math.min(...allWeekVals):null};
   });
@@ -2070,13 +2097,34 @@ async function savePrize(){
 // If it's past 12pm AEST and a player has no score for that day, auto-lock to +3
 // Can only be overridden by admin with proof
 
+// Returns the current UTC offset in minutes for Sydney (AEST/AEDT).
+// Sydney observes AEDT (UTC+11) from first Sunday in October to first Sunday in April,
+// and AEST (UTC+10) otherwise. We detect this by comparing two Date representations.
+function getSydneyOffsetMinutes(){
+  const now=new Date();
+  // Intl gives us the Sydney wall-clock time reliably
+  const sydneyStr=now.toLocaleString('en-AU',{timeZone:'Australia/Sydney',hour:'numeric',minute:'numeric',hour12:false});
+  const utcH=now.getUTCHours(),utcM=now.getUTCMinutes();
+  const parts=sydneyStr.match(/(\d+):(\d+)/);
+  if(!parts)return 600; // fallback AEST
+  let sh=parseInt(parts[1]),sm=parseInt(parts[2]);
+  let diffM=(sh*60+sm)-(utcH*60+utcM);
+  if(diffM<0)diffM+=1440;
+  if(diffM>720)diffM-=1440;
+  return diffM; // +600 = AEST, +660 = AEDT
+}
+
 async function autoLockMissedDays(){
   if(!currentWeekStart||!players.length)return;
 
-  // Get current AEST time (UTC+10)
+  // Only lock the ACTUAL current week — never run against past/navigated weeks
+  const trueCurrentMonday=getMonday();
+  if(currentWeekStart!==trueCurrentMonday)return;
+
+  // Get current Sydney time using dynamic offset
   const nowUTC=new Date();
-  const aestOffset=10*60; // minutes
-  const aestNow=new Date(nowUTC.getTime()+aestOffset*60*1000);
+  const sydneyOffsetMs=getSydneyOffsetMinutes()*60*1000;
+  const aestNow=new Date(nowUTC.getTime()+sydneyOffsetMs);
   const aestDay=aestNow.getUTCDay(); // 0=Sun,1=Mon...5=Fri,6=Sat
   const aestHour=aestNow.getUTCHours();
   const aestMin=aestNow.getUTCMinutes();
@@ -2122,21 +2170,49 @@ async function autoLockMissedDays(){
 }
 
 // ─── PROOF UPLOAD ──────────────────────────────────────────────────────────────
+// Compress image to JPEG ≤200KB via canvas before storing — avoids bloating DB rows
+
+function compressImageToJpeg(file, maxBytes, callback){
+  const img=new Image();
+  const url=URL.createObjectURL(file);
+  img.onload=function(){
+    URL.revokeObjectURL(url);
+    const canvas=document.createElement('canvas');
+    // Scale down to max 1200px wide
+    const maxW=1200;
+    let w=img.width,h=img.height;
+    if(w>maxW){h=Math.round(h*maxW/w);w=maxW;}
+    canvas.width=w;canvas.height=h;
+    canvas.getContext('2d').drawImage(img,0,0,w,h);
+    // Try decreasing quality until under maxBytes
+    let quality=0.85;
+    let dataUrl=canvas.toDataURL('image/jpeg',quality);
+    while(dataUrl.length>maxBytes&&quality>0.2){
+      quality-=0.1;
+      dataUrl=canvas.toDataURL('image/jpeg',quality);
+    }
+    callback(dataUrl);
+  };
+  img.onerror=function(){URL.revokeObjectURL(url);callback(null);};
+  img.src=url;
+}
 
 function handleProofFile(input){
   const file=input.files[0];
   if(!file)return;
-  if(file.size>4*1024*1024){showToast('Image too large — try under 4MB');return}
-  const reader=new FileReader();
-  reader.onload=e=>{
-    proofDataUrl=e.target.result;
+  if(file.size>10*1024*1024){showToast('Image too large — try under 10MB');return}
+  // Target ≤200KB base64 (≈150KB raw) to keep DB rows small
+  const maxBase64=200*1024;
+  compressImageToJpeg(file,maxBase64,function(dataUrl){
+    if(!dataUrl){showToast('Could not read image, try another');return}
+    proofDataUrl=dataUrl;
     document.getElementById('proofPreviewImg').src=proofDataUrl;
     document.getElementById('proofPreview').style.display='block';
     document.getElementById('proofDrop').style.display='none';
-    document.getElementById('proofStatusText').textContent='✅ Proof ready to save';
+    const kb=Math.round(dataUrl.length*0.75/1024);
+    document.getElementById('proofStatusText').textContent=`✅ Proof ready (${kb}KB)`;
     document.getElementById('proofStatusText').className='proof-status verified';
-  };
-  reader.readAsDataURL(file);
+  });
 }
 
 function removeProof(){
